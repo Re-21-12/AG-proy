@@ -1,0 +1,10 @@
+Arista,TipoArista,NodoOrigen,NodoDestino,CapacidadMinima,CapacidadMaxima,FlujoEntrada,PorcentajeDeTiempo
+a1,ENTRADA,n1,n2,0,0,500,%
+a2,INTERMEDIO,n2,n3,25,750,0,%
+a3,INTERMEDIO,n3,n4,10,720,0,%
+a4,SALIDA,n4,n5,15,1000,0,%
+a5,INTERMEDIO,n7,n2,7,414,0,%
+a6,INTERMEDIO,n7,n4,8,416,0,%
+a7,ENTRADA,n6,n7,0,0,200,%
+a8,INTERMEDIO,n7,n8,5,410,0,%
+a9,SALIDA,n8,n9,9,1000,0,%
