@@ -1,5 +1,6 @@
 import random
 from logic.individual import Individual
+from logic.state import app_state # Importar el estado de la aplicación
 
 class GeneticAlgorithm:
     minProb = 0.1
@@ -30,21 +31,75 @@ class GeneticAlgorithm:
 
     def _mutate(self, individual):
         """Muta los genes de un individuo basado en la probabilidad de mutación."""
-        for i in range(individual.long_genes):
-            if random.random() < self.mutation_prob:
-                individual.genes[i] = round(random.uniform(self.minProb, self.maxProb), 2)
-
-    def _evaluate_population(self, ENTRANCE):
-        """
-        Placeholder para la función de evaluación.
-        Aquí es donde calcularías el fitness de cada individuo.
-        Por ahora, asignaremos un fitness aleatorio para demostración.
-        """
-    
-        for individual in self.population:
-            # Reemplaza esto con tu lógica de evaluación real
+        # La mutación debe ser inteligente para mantener la suma de los genes en 1.0
+        if random.random() < self.mutation_prob:
+            # Selecciona dos puntos aleatorios para intercambiar una pequeña porción
+            idx1, idx2 = random.sample(range(individual.long_genes), 2)
+            cantidad = round(random.uniform(0.01, min(individual.genes[idx1], 0.1)), 2)
             
-            individual.fitness = individual.genes 
+            # Asegurarse de que el gen no se vuelva negativo
+            if individual.genes[idx1] - cantidad > 0:
+                individual.genes[idx1] -= cantidad
+                individual.genes[idx2] += cantidad
+                individual.genes[idx1] = round(individual.genes[idx1], 2)
+                individual.genes[idx2] = round(individual.genes[idx2], 2)
+
+
+    def _evaluate_population(self):
+        """
+        Calcula el fitness de cada individuo simulando el flujo a través del grafo.
+        El fitness será el flujo total que llega a las aristas de tipo 'SALIDA'.
+        """
+        edges_data_frame = app_state.aristas_df
+        edge_capacities = app_state.edge_capacities
+
+        for individual in self.population:
+            current_flow_edges = [0] * len(edges_data_frame)
+            
+            # 1. Asignar flujo inicial a las aristas de ENTRADA
+            for i, edge in edges_data_frame.iterrows():
+                if edge['TipoArista'] == 'ENTRADA':
+                    # El flujo de entrada se limita a la capacidad máxima de la arista (si la tuviera)
+                    # y se multiplica por el porcentaje de tiempo del semáforo (gen)
+                    max_flow_edge = edge_capacities[i][1] if edge_capacities[i][1] > 0 else edge['FlujoEntrada']
+                    initial_flow = min(edge['FlujoEntrada'], max_flow_edge)
+                    current_flow_edges[i] = initial_flow * individual.genes[i]
+
+            # 2. Simular el flujo a través de los nodos intermedios
+            # Esta es una simulación simplificada. Un modelo más complejo usaría un bucle
+            # hasta que el flujo se estabilice.
+            for _ in range(len(edges_data_frame)): # Iterar varias veces para propagar el flujo
+                flujo_entrante_nodos = {}
+                # Calcular el flujo total que llega a cada nodo
+                for i, edge in edges_data_frame.iterrows():
+                    nodo_destino = edge['NodoDestino']
+                    if nodo_destino not in flujo_entrante_nodos:
+                        flujo_entrante_nodos[nodo_destino] = 0
+                    flujo_entrante_nodos[nodo_destino] += current_flow_edges[i]
+
+                # Distribuir el flujo desde los nodos hacia las aristas salientes
+                for i, edge in edges_data_frame.iterrows():
+                    if edge['TipoArista'] == 'INTERMEDIO':
+                        nodo_origen = edge['NodoOrigen']
+                        if nodo_origen in flujo_entrante_nodos:
+                            # El flujo que puede pasar se limita por la capacidad de la arista
+                            # y el porcentaje del semáforo (gen)
+                            flujo_disponible = flujo_entrante_nodos[nodo_origen]
+                            capacidad_max = edge_capacities[i][1]
+                            flujo_a_pasar = min(flujo_disponible, capacidad_max) * individual.genes[i]
+                            current_flow_edges[i] = flujo_a_pasar
+                            # Restar el flujo que ya pasó para no contarlo dos veces
+                            flujo_entrante_nodos[nodo_origen] -= flujo_a_pasar
+
+
+            # 3. Calcular el fitness como la suma del flujo en las aristas de SALIDA
+            fitness_total = 0
+            for i, edge in edges_data_frame.iterrows():
+                if edge['TipoArista'] == 'SALIDA':
+                    # El flujo que llega a una salida es el que pudo pasar por la arista
+                    fitness_total += current_flow_edges[i]
+            
+            individual.fitness = round(fitness_total, 2)
 
     def run(self):
         """Ejecuta el algoritmo genético."""

@@ -11,9 +11,9 @@ class AppState:
     """
 
     def __init__(self):
-        self.configuracion = {}
-        self.flujo_total_entrada = 0
-        self.capacidades_aristas = []  # Almacenará tuplas (min, max)
+        self.settings = {}
+        self.total_input_flow = 0
+        self.edge_capacities = []  # Almacenará tuplas (min, max)
         self.num_genes = 0 # Cantidad de aristas que serán controladas por el AG
 
     def configurar_datos(self, configuracion, df_aristas):
@@ -24,7 +24,7 @@ class AppState:
             configuracion (dict): Diccionario con 'individuos', 'eficiencia', etc.
             df_aristas (pd.DataFrame): DataFrame con los datos de las aristas de la tabla.
         """
-        self.configuracion = configuracion
+        self.settings = configuracion
         self.procesar_aristas(df_aristas)
 
     def procesar_aristas(self, df):
@@ -40,11 +40,11 @@ class AppState:
         df['CapacidadMaxima'] = pd.to_numeric(df['CapacidadMaxima'], errors='coerce').fillna(0)
 
         # 1. Suma de flujo de entrada
-        df_entradas = df[df['TipoArista'] == 'ENTRADA']
-        self.flujo_total_entrada = df_entradas['FlujoEntrada'].sum()
+        input_edges_df = df[df['TipoArista'] == 'ENTRADA']
+        self.total_input_flow = input_edges_df['FlujoEntrada'].sum()
 
         # 2. Arreglo con flujo máximo y mínimo por arista
-        self.capacidades_aristas = list(zip(df['CapacidadMinima'], df['CapacidadMaxima']))
+        self.edge_capacities = list(zip(df['CapacidadMinima'], df['CapacidadMaxima']))
         
         # 3. Determinar el número de genes (longitud del cromosoma)
         #    Asumimos que cada arista es un gen.
@@ -52,7 +52,7 @@ class AppState:
 
 
     def obtener_configuracion(self):
-        return self.configuracion.copy()
+        return self.settings.copy()
 
 
 # Instancia única que se compartirá en toda la aplicación
