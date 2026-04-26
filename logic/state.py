@@ -1,7 +1,18 @@
 import random
 import pandas as pd
 from logic.graph import generar_grafo_flujo
-from logic.state import app_state # Importar la instancia de AppState
+from dataclasses import dataclass, field
+import pandas as pd
+
+@dataclass
+class AppState:
+    """Almacena el estado global de la aplicación."""
+    aristas_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    edge_capacities: list = field(default_factory=list)
+
+# Instancia única que será compartida
+app_state = AppState()
+
 
 
 class AppState:

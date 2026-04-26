@@ -7,7 +7,7 @@ from ui.config_window import VentanaConfiguracion
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    estado = {"config": None, "editor": None}
+    estado: dict = {"config": None, "editor": None}
 
     def abrir_editor(configuracion):
         estado["config"].hide()

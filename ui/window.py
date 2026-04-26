@@ -54,8 +54,9 @@ class VentanaEditarGrafo(QMainWindow):
         self.btn_quitar = QPushButton("Quitar")
         self.btn_preview = QPushButton("Preview")
         self.btn_limpiar = QPushButton("Limpiar")
+        self.btn_ejecutar = QPushButton("Ejecutar Algoritmo")
 
-        for btn in [self.btn_agregar, self.btn_quitar, self.btn_preview, self.btn_limpiar]:
+        for btn in [self.btn_agregar, self.btn_quitar, self.btn_preview, self.btn_limpiar, self.btn_ejecutar]:
             btn.setFixedWidth(100)
             self.layout_botones.addWidget(btn)
 
@@ -66,6 +67,7 @@ class VentanaEditarGrafo(QMainWindow):
         self.btn_preview.clicked.connect(self.mostrar_grafico)
         self.btn_agregar.clicked.connect(self.agregar_fila)
         self.btn_quitar.clicked.connect(self.quitar_fila)
+        self.btn_ejecutar.clicked.connect(self.ejecutar_algoritmo)
 
     def _sanitizar_valor(self, valor, columna=""):
         """Sanitiza el valor según las reglas de cada columna."""
@@ -138,6 +140,55 @@ class VentanaEditarGrafo(QMainWindow):
         # 2. Llamar a tu función (asegúrate de que esté importada)
         from logic.graph import generar_grafo_flujo
         generar_grafo_flujo()
+
+    def ejecutar_algoritmo(self):
+        """Prepara y ejecuta el algoritmo genético."""
+        # 1. Guardar cambios de la tabla al DataFrame y actualizar estado
+        datos_editados = []
+        for row in range(self.tabla.rowCount()):
+            fila = {}
+            for j, col in enumerate(self.columnas_visibles):
+                item = self.tabla.item(row, j)
+                fila[col] = self._sanitizar_valor(item.text() if item else None, col)
+            datos_editados.append(fila)
+
+        nuevo_df = pd.DataFrame(datos_editados)
+        for col in self.df.columns:
+            if col in self.COLUMNAS_OCULTAS and col not in nuevo_df.columns:
+                orig = self.df[col].values
+                nuevo_df[col] = list(orig[:len(nuevo_df)]) + [""] * max(0, len(nuevo_df) - len(orig))
+        
+        nuevo_df = nuevo_df.reindex(columns=self.df.columns)
+        
+        # Actualizar el estado global
+        from logic.state import app_state
+        from logic.algorithm import GeneticAlgorithm
+        from PyQt6.QtWidgets import QMessageBox
+
+        app_state.aristas_df = nuevo_df
+        app_state.edge_capacities = list(zip(
+            pd.to_numeric(nuevo_df['CapacidadMinima'], errors='coerce').fillna(0),
+            pd.to_numeric(nuevo_df['CapacidadMaxima'], errors='coerce').fillna(0)
+        ))
+
+        # 2. Instanciar y ejecutar el algoritmo
+        try:
+            ga = GeneticAlgorithm(
+                population_size=self.configuracion.get('individuos', 50),
+                gene_count=len(app_state.aristas_df),
+                max_generations=self.configuracion.get('generaciones', 100)
+            )
+            mejor_solucion = ga.run()
+
+            # 3. Mostrar resultados
+            QMessageBox.information(
+                self,
+                "Resultado del Algoritmo",
+                f"Mejor Fitness (Flujo total de salida): {mejor_solucion.fitness}\n\n"
+                f"Configuración de semáforos optimizada:\n{mejor_solucion.genes}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error en Algoritmo", f"Ocurrió un error: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
