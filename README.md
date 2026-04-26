@@ -65,6 +65,49 @@ $$
 7. Resultado
    - Tras `max_generations`, se devuelve el mejor individuo encontrado.
 
+## Lógica interna del algoritmo (paso a paso)
+
+El ciclo del AG en este proyecto sigue esta secuencia operativa:
+
+1. Se genera una población inicial de individuos (cromosomas).
+2. Se calcula fitness para toda la población propagando flujo en el grafo.
+3. Se guarda el mejor individuo global inicial.
+4. Por cada generación:
+   - Se clona el mejor individuo actual (elitismo).
+   - Se seleccionan padres por ruleta.
+   - Se aplica cruce de un punto con probabilidad definida.
+   - Se aplica mutación por transferencia entre genes.
+   - Se construye la nueva población.
+   - Se recalcula fitness para todos los nuevos individuos.
+   - Se reemplaza el peor por el mejor previo (elitismo).
+   - Si aparece una mejor solución global, se registra como mejora.
+5. Al terminar las generaciones, se retorna el mejor individuo global encontrado.
+
+## Diagrama de flujo del algoritmo
+
+```mermaid
+flowchart TD
+    A[Inicio] --> B[Leer grafo y capacidades desde app_state]
+    B --> C[Inicializar población]
+    C --> D[Evaluar fitness inicial]
+    D --> E[Guardar mejor global inicial]
+    E --> F{Generación < max_generations?}
+    F -- No --> N[Retornar mejor global]
+    F -- Sí --> G[Clonar mejor de la generación actual]
+    G --> H[Seleccionar padres por ruleta]
+    H --> I[Cruce de un punto]
+    I --> J[Mutación por transferencia]
+    J --> K[Construir nueva población]
+    K --> L[Evaluar fitness nueva población]
+    L --> M[Elitismo: reemplazar peor por mejor previo]
+    M --> O{¿Mejora mejor global?}
+    O -- Sí --> P[Actualizar mejor global y loguear mejora]
+    O -- No --> Q[Continuar]
+    P --> R[Incrementar generación]
+    Q --> R
+    R --> F
+```
+
 ## Operadores usados y aplicación en este problema
 
 ### Selección (ruleta)
