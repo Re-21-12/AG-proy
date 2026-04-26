@@ -36,8 +36,10 @@ class Individual:
         self.fitness = 0 
 
     def clone(self):
-        # Retorna un nuevo objeto con la misma configuración de genes
-        return Individual(genes=self.genes)
+        # Retorna un nuevo objeto con la misma configuración de genes y fitness
+        clone = Individual(genes=self.genes)
+        clone.fitness = self.fitness
+        return clone
         
     # Metodo ToString
     def __str__(self):

@@ -1,6 +1,19 @@
 import random
-from logic.individual import Individual
-from logic.state import app_state
+import logging
+
+try:
+    from logic.individual import Individual
+    from logic.state import app_state
+except ModuleNotFoundError:
+    import os
+    import sys
+
+    # Permite ejecutar este archivo directamente: python logic/algorithm.py
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from logic.individual import Individual
+    from logic.state import app_state
 
 
 class GeneticAlgorithm:
@@ -11,31 +24,53 @@ class GeneticAlgorithm:
         crossover_prob=0.7,
         mutation_prob=0.1,
         max_generations=100,
+        debug=False,
+        log_every=10,
     ):
+        self.logger = self._setup_logger(debug)
         # Aseguramos que la población sea par para el cruce por parejas
         self.population_size = population_size if population_size % 2 == 0 else population_size + 1
         self.gene_count = gene_count
         self.crossover_prob = crossover_prob
         self.mutation_prob = mutation_prob
         self.max_generations = max_generations
+        self.log_every = max(1, int(log_every))
         self.population = []
         self.generation = 0
+        self._fitness_calls = 0
+        self._selection_calls = 0
 
         # Optimización: Convertir DF a lista para acceso rápido en el bucle de fitness
         self.edges_list = app_state.aristas_df.to_dict("records")
+        self.logger.info(
+            "AG inicializado | poblacion=%s genes=%s generaciones=%s aristas=%s",
+            self.population_size,
+            self.gene_count,
+            self.max_generations,
+            len(self.edges_list),
+        )
         self.edge_capacities = app_state.edge_capacities
 
         # CORRECCIÓN #7: Calcular profundidad real del grafo para la propagación
         self._propagation_depth = self._compute_graph_depth()
+        self.logger.info("Profundidad del grafo calculada: %s", self._propagation_depth)
 
-    # ─────────────────────────────────────────────────────────────────────────────
+    def _setup_logger(self, debug: bool) -> logging.Logger:
+        logger = logging.getLogger("genetic_algorithm")
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter("[%(levelname)s][AG] %(message)s")
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG if debug else logging.INFO)
+        logger.propagate = False
+        return logger
+
     # CORRECCIÓN #7: Calcular profundidad del grafo basada en su topología
-    # ─────────────────────────────────────────────────────────────────────────────
     def _compute_graph_depth(self) -> int:
         """
         Calcula la profundidad máxima del grafo (número de niveles de nodos)
-        mediante BFS desde los nodos de entrada.
-        Garantiza que la propagación cubra todos los niveles.
+        mediante BFS desde los nodos de entrada. Breath First Search (BFS) 
         """
         # Construir lista de adyacencia
         graph = {}
@@ -44,10 +79,14 @@ class GeneticAlgorithm:
             dst = edge["NodoDestino"]
             graph.setdefault(src, []).append(dst)
 
-        # Nodos raíz = nodos que aparecen en aristas de ENTRADA
+        self.logger.debug("Adyacencia construida con %s nodos origen.", len(graph))
+
+        # ingresa a edges_list busca las aritas de origen si el tipo de arista es entrada es raiz
         roots = {e["NodoOrigen"] for e in self.edges_list if e["TipoArista"] == "ENTRADA"}
+        self.logger.debug("Nodos raiz detectados: %s", sorted(roots))
 
         if not roots:
+            self.logger.warning("No se detectaron aristas ENTRADA; se usa profundidad por defecto=5.")
             return 5  # Valor por defecto si no hay nodos de entrada definidos
 
         # BFS para calcular la profundidad máxima
@@ -62,24 +101,35 @@ class GeneticAlgorithm:
                 queue.append((neighbor, depth + 1))
 
         max_depth = max(visited.values(), default=3)
-        # Al menos 1 iteración, sin acotar arbitrariamente
-        return max(1, max_depth)
+        final_depth = max(1, max_depth)
+        self.logger.debug("Profundidad BFS maxima=%s", final_depth)
+        return final_depth
 
-    # ─────────────────────────────────────────────────────────────────────────────
     # Inicialización
-    # ─────────────────────────────────────────────────────────────────────────────
     def _initialize_population(self):
-        """Crea la población inicial."""
+        """Crea la población inicial.
+        cada gen en el individuo representa un porcentaje de tiempo en cada semaforo """
         self.population = [Individual(long_genes=self.gene_count) for _ in range(self.population_size)]
+        if self.population:
+            self.logger.info("Poblacion inicial creada: %s individuos", len(self.population))
+            self.logger.debug("Primer individuo: %s", self.population[0])
 
-    # ─────────────────────────────────────────────────────────────────────────────
     # Evaluación de fitness
-    # ─────────────────────────────────────────────────────────────────────────────
     def _evaluate_population(self):
         """Calcula el fitness (Flujo total en aristas de SALIDA)."""
         for individual in self.population:
             individual.fitness = self._compute_fitness(individual)
+        if self.population:
+            fitness_values = [ind.fitness for ind in self.population]
+            avg_fit = sum(fitness_values) / len(fitness_values)
+            self.logger.debug(
+                "Fitness poblacion | min=%.4f avg=%.4f max=%.4f",
+                min(fitness_values),
+                avg_fit,
+                max(fitness_values),
+            )
 
+# le pasa el individuo y a la clase misma
     def _compute_fitness(self, individual) -> float:
         """
         Calcula el flujo total que sale por las aristas de SALIDA.
@@ -89,8 +139,9 @@ class GeneticAlgorithm:
         que nodos profundos del grafo reciban flujo correctamente.
         CORRECCIÓN #7: Se usa la profundidad real del grafo en lugar de 3 fijo.
         """
-        n = len(self.edges_list)
-        current_flow_edges = [0.0] * n
+        total_edges = len(self.edges_list)
+        current_flow_edges = [0.0] * total_edges
+        self._fitness_calls += 1
 
         # ── 1. Flujo de ENTRADA ────────────────────────────────────────────────
         for i, edge in enumerate(self.edges_list):
@@ -101,6 +152,18 @@ class GeneticAlgorithm:
                 initial_flow = min(flujo_entrada, max_cap)
                 current_flow_edges[i] = initial_flow * individual.genes[i]
 
+        if self._fitness_calls <= 3:
+            input_flows = [
+                current_flow_edges[i]
+                for i, e in enumerate(self.edges_list)
+                if e["TipoArista"] == "ENTRADA"
+            ]
+            self.logger.debug(
+                "Fitness call #%s | total_aristas=%s | flujos_entrada=%s",
+                self._fitness_calls,
+                total_edges,
+                input_flows,
+            )
         # ── 2. Propagación con flujo acumulado persistente ────────────────────
         # Acumulamos flujo_entrante_nodos entre iteraciones para que nodos
         # a varios saltos de la entrada reciban el flujo correcto.
@@ -146,7 +209,10 @@ class GeneticAlgorithm:
             for i, edge in enumerate(self.edges_list)
             if edge["TipoArista"] == "SALIDA"
         )
-        return round(fitness_total, 4)
+        fitness_total = round(fitness_total, 4)
+        if self._fitness_calls <= 3:
+            self.logger.debug("Fitness call #%s resultado=%.4f", self._fitness_calls, fitness_total)
+        return fitness_total
 
     # ─────────────────────────────────────────────────────────────────────────────
     # Selección
@@ -162,6 +228,7 @@ class GeneticAlgorithm:
         seleccionados para cruce sean distintos, preservando diversidad genética.
         """
         pool = [ind for ind in self.population if ind is not exclude] or self.population
+        self._selection_calls += 1
 
         min_f = min(ind.fitness for ind in pool)
         # Desplazar para que todos sean >= 0 (maneja fitness negativos)
@@ -170,13 +237,24 @@ class GeneticAlgorithm:
         total_f = sum(adjusted)
 
         if total_f == 0:
-            return random.choice(pool)
+            selected = random.choice(pool)
+            if self._selection_calls <= 5:
+                self.logger.debug("Seleccion #%s por azar (fitness total=0)", self._selection_calls)
+            return selected
 
         pick = random.uniform(0, total_f)
         current = 0.0
         for ind, adj_f in zip(pool, adjusted):
             current += adj_f
             if current >= pick:
+                if self._selection_calls <= 5:
+                    self.logger.debug(
+                        "Seleccion #%s | pick=%.4f total=%.4f fitness_sel=%.4f",
+                        self._selection_calls,
+                        pick,
+                        total_f,
+                        ind.fitness,
+                    )
                 return ind
         return pool[-1]
 
@@ -197,8 +275,10 @@ class GeneticAlgorithm:
             point = random.randint(1, self.gene_count - 1)
             child1_genes = g1[:point] + g2[point:]
             child2_genes = g2[:point] + g1[point:]
+            self.logger.debug("Cruce aplicado en punto=%s", point)
             return Individual(genes=child1_genes), Individual(genes=child2_genes)
 
+        self.logger.debug("Cruce omitido por probabilidad")
         return parent1.clone(), parent2.clone()
 
     # ─────────────────────────────────────────────────────────────────────────────
@@ -215,6 +295,7 @@ class GeneticAlgorithm:
         limitarse siempre a exactamente 2 genes.
         """
         genes = individual.genes
+        mutation_count = 0
 
         for idx1 in range(len(genes)):
             if random.random() >= self.mutation_prob:
@@ -232,13 +313,25 @@ class GeneticAlgorithm:
 
             genes[idx1] = max(0.0, round(genes[idx1] - cantidad, 2))
             genes[idx2] = min(1.0, round(genes[idx2] + cantidad, 2))  # CORRECCIÓN #1
+            mutation_count += 1
+
+        if mutation_count > 0:
+            self.logger.debug("Mutaciones aplicadas en individuo: %s", mutation_count)
 
     # ─────────────────────────────────────────────────────────────────────────────
     # Bucle principal
     # ─────────────────────────────────────────────────────────────────────────────
     def run(self):
+        self.logger.info("Inicio de ejecucion del AG")
         self._initialize_population()
         self._evaluate_population()
+
+        global_best = self.get_best_individual().clone()
+        self.logger.info(
+            "Estado inicial | mejor_fitness=%.4f | individuo=%s",
+            global_best.fitness,
+            global_best,
+        )
 
         for _ in range(self.max_generations):
             # ELITISMO: Guardamos al mejor antes de alterar la población.
@@ -269,10 +362,38 @@ class GeneticAlgorithm:
             self.population[peor_idx] = best_ind  # fitness ya válido (CORRECCIÓN #6)
 
             self.generation += 1
-            if self.generation % 10 == 0:
-                print(f"Gen {self.generation} | Mejor Fitness: {self.get_best_individual().fitness}")
+            best_individual = self.get_best_individual()
 
-        return self.get_best_individual()
+            if best_individual.fitness > global_best.fitness:
+                delta = best_individual.fitness - global_best.fitness
+                global_best = best_individual.clone()
+                self.logger.info(
+                    "MEJORA Gen %s | nuevo_best=%.4f | delta=+%.4f | individuo=%s",
+                    self.generation,
+                    global_best.fitness,
+                    delta,
+                    global_best,
+                )
+
+            if self.generation == 1 or self.generation % self.log_every == 0 or self.generation == self.max_generations:
+                best = best_individual.fitness
+                worst = min(self.population, key=lambda x: x.fitness).fitness
+                avg = sum(ind.fitness for ind in self.population) / len(self.population)
+                self.logger.info(
+                    "Gen %s/%s | best_gen=%.4f best_global=%.4f avg=%.4f worst=%.4f",
+                    self.generation,
+                    self.max_generations,
+                    best,
+                    global_best.fitness,
+                    avg,
+                    worst,
+                )
+                self.logger.debug("Mejor individuo actual: %s", best_individual)
+
+        result = global_best
+        self.logger.info("Ejecucion finalizada | mejor_fitness=%.4f", result.fitness)
+        self.logger.info("Mejor individuo final: %s", result)
+        return result
 
     # ─────────────────────────────────────────────────────────────────────────────
     # Utilidades
