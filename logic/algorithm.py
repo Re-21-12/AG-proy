@@ -1,5 +1,6 @@
 import random
 import logging
+from collections import deque
 
 try:
     from logic.individual import Individual
@@ -17,6 +18,11 @@ except ModuleNotFoundError:
 
 
 class GeneticAlgorithm:
+    DEFAULT_DEPTH_WITHOUT_ROOTS = 5
+    FITNESS_DEBUG_CALLS = 3
+    SELECTION_DEBUG_CALLS = 5
+    MAX_MUTATION_TRANSFER = 0.1
+
     def __init__(
         self,
         population_size=20,
@@ -55,6 +61,44 @@ class GeneticAlgorithm:
         self._propagation_depth = self._compute_graph_depth()
         self.logger.info("Profundidad del grafo calculada: %s", self._propagation_depth)
 
+    def _population_stats(self):
+        if not self.population:
+            return 0.0, 0.0, 0.0
+        fitness_values = [ind.fitness for ind in self.population]
+        avg_fit = sum(fitness_values) / len(fitness_values)
+        return min(fitness_values), avg_fit, max(fitness_values)
+
+    def _should_log_generation(self):
+        return (
+            self.generation == 1
+            or self.generation % self.log_every == 0
+            or self.generation == self.max_generations
+        )
+
+    def _log_generation_summary(self, best_global_fitness: float, best_individual):
+        worst, avg, best = self._population_stats()
+        self.logger.info(
+            "Gen %s/%s | best_gen=%.4f best_global=%.4f avg=%.4f worst=%.4f",
+            self.generation,
+            self.max_generations,
+            best,
+            best_global_fitness,
+            avg,
+            worst,
+        )
+        self.logger.debug("Mejor individuo actual: %s", best_individual)
+
+    def _create_next_generation(self):
+        new_population = []
+        for _ in range(self.population_size // 2):
+            p1 = self._select_individual()
+            p2 = self._select_individual(exclude=p1)
+            c1, c2 = self._crossover(p1, p2)
+            self._mutate(c1)
+            self._mutate(c2)
+            new_population.extend([c1, c2])
+        return new_population
+
     def _setup_logger(self, debug: bool) -> logging.Logger:
         logger = logging.getLogger("genetic_algorithm")
         if not logger.handlers:
@@ -86,14 +130,17 @@ class GeneticAlgorithm:
         self.logger.debug("Nodos raiz detectados: %s", sorted(roots))
 
         if not roots:
-            self.logger.warning("No se detectaron aristas ENTRADA; se usa profundidad por defecto=5.")
-            return 5  # Valor por defecto si no hay nodos de entrada definidos
+            self.logger.warning(
+                "No se detectaron aristas ENTRADA; se usa profundidad por defecto=%s.",
+                self.DEFAULT_DEPTH_WITHOUT_ROOTS,
+            )
+            return self.DEFAULT_DEPTH_WITHOUT_ROOTS
 
         # BFS para calcular la profundidad máxima
         visited = {}
-        queue = [(root, 0) for root in roots]
+        queue = deque((root, 0) for root in roots)
         while queue:
-            node, depth = queue.pop(0)
+            node, depth = queue.popleft()
             if node in visited and visited[node] >= depth:
                 continue
             visited[node] = depth
@@ -120,13 +167,12 @@ class GeneticAlgorithm:
         for individual in self.population:
             individual.fitness = self._compute_fitness(individual)
         if self.population:
-            fitness_values = [ind.fitness for ind in self.population]
-            avg_fit = sum(fitness_values) / len(fitness_values)
+            min_fit, avg_fit, max_fit = self._population_stats()
             self.logger.debug(
                 "Fitness poblacion | min=%.4f avg=%.4f max=%.4f",
-                min(fitness_values),
+                min_fit,
                 avg_fit,
-                max(fitness_values),
+                max_fit,
             )
 
 # le pasa el individuo y a la clase misma
@@ -152,7 +198,7 @@ class GeneticAlgorithm:
                 initial_flow = min(flujo_entrada, max_cap)
                 current_flow_edges[i] = initial_flow * individual.genes[i]
 
-        if self._fitness_calls <= 3:
+        if self._fitness_calls <= self.FITNESS_DEBUG_CALLS:
             input_flows = [
                 current_flow_edges[i]
                 for i, e in enumerate(self.edges_list)
@@ -210,7 +256,7 @@ class GeneticAlgorithm:
             if edge["TipoArista"] == "SALIDA"
         )
         fitness_total = round(fitness_total, 4)
-        if self._fitness_calls <= 3:
+        if self._fitness_calls <= self.FITNESS_DEBUG_CALLS:
             self.logger.debug("Fitness call #%s resultado=%.4f", self._fitness_calls, fitness_total)
         return fitness_total
 
@@ -238,7 +284,7 @@ class GeneticAlgorithm:
 
         if total_f == 0:
             selected = random.choice(pool)
-            if self._selection_calls <= 5:
+            if self._selection_calls <= self.SELECTION_DEBUG_CALLS:
                 self.logger.debug("Seleccion #%s por azar (fitness total=0)", self._selection_calls)
             return selected
 
@@ -247,7 +293,7 @@ class GeneticAlgorithm:
         for ind, adj_f in zip(pool, adjusted):
             current += adj_f
             if current >= pick:
-                if self._selection_calls <= 5:
+                if self._selection_calls <= self.SELECTION_DEBUG_CALLS:
                     self.logger.debug(
                         "Seleccion #%s | pick=%.4f total=%.4f fitness_sel=%.4f",
                         self._selection_calls,
@@ -305,7 +351,7 @@ class GeneticAlgorithm:
             idx2 = random.choice([j for j in range(len(genes)) if j != idx1])
 
             # Cantidad máxima que se puede transferir sin violar [0, 1]
-            max_cambio = min(genes[idx1], 1.0 - genes[idx2], 0.1)
+            max_cambio = min(genes[idx1], 1.0 - genes[idx2], self.MAX_MUTATION_TRANSFER)
             if max_cambio <= 0:
                 continue
 
@@ -339,20 +385,7 @@ class GeneticAlgorithm:
             # no es necesario re-evaluarlo al insertarlo en la nueva generación.
             best_ind = self.get_best_individual().clone()
 
-            new_population = []
-
-            # Crear nueva generación por parejas
-            for _ in range(self.population_size // 2):
-                # CORRECCIÓN #4: Selección de padres distintos
-                p1 = self._select_individual()
-                p2 = self._select_individual(exclude=p1)
-
-                c1, c2 = self._crossover(p1, p2)
-
-                self._mutate(c1)
-                self._mutate(c2)
-
-                new_population.extend([c1, c2])
+            new_population = self._create_next_generation()
 
             self.population = new_population
             self._evaluate_population()
@@ -375,20 +408,8 @@ class GeneticAlgorithm:
                     global_best,
                 )
 
-            if self.generation == 1 or self.generation % self.log_every == 0 or self.generation == self.max_generations:
-                best = best_individual.fitness
-                worst = min(self.population, key=lambda x: x.fitness).fitness
-                avg = sum(ind.fitness for ind in self.population) / len(self.population)
-                self.logger.info(
-                    "Gen %s/%s | best_gen=%.4f best_global=%.4f avg=%.4f worst=%.4f",
-                    self.generation,
-                    self.max_generations,
-                    best,
-                    global_best.fitness,
-                    avg,
-                    worst,
-                )
-                self.logger.debug("Mejor individuo actual: %s", best_individual)
+            if self._should_log_generation():
+                self._log_generation_summary(global_best.fitness, best_individual)
 
         result = global_best
         self.logger.info("Ejecucion finalizada | mejor_fitness=%.4f", result.fitness)
