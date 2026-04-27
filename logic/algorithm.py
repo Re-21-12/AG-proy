@@ -330,6 +330,7 @@ class GeneticAlgorithm:
     # ─────────────────────────────────────────────────────────────────────────────
     # Mutación
     # ─────────────────────────────────────────────────────────────────────────────
+
     def _mutate(self, individual):
         """
         Mutación que mantiene la integridad de los genes en el rango [0, 1].
@@ -347,22 +348,33 @@ class GeneticAlgorithm:
             if random.random() >= self.mutation_prob:
                 continue
 
-            # Elegir un segundo gen distinto al azar
             idx2 = random.choice([j for j in range(len(genes)) if j != idx1])
+            
+            # CUMPLIMIENTO: Obtener el límite mínimo de la tabla para el gen idx1
+            # Calculamos el ratio mínimo: CapacidadMinima / CapacidadMaxima
+            cap_min = self.edge_capacities[idx1][0]
+            cap_max = self.edge_capacities[idx1][1]
+            min_permitido = (cap_min / cap_max) if cap_max > 0 else 0.0
 
-            # Cantidad máxima que se puede transferir sin violar [0, 1]
-            max_cambio = min(genes[idx1], 1.0 - genes[idx2], self.MAX_MUTATION_TRANSFER)
-            if max_cambio <= 0:
+            # Cantidad máxima que se puede quitar a idx1 sin bajar del mínimo permitido
+            max_disponible_para_quitar = max(0.0, genes[idx1] - min_permitido)
+            
+            # Cantidad máxima que puede recibir idx2 sin pasarse de 1.0
+            max_espacio_en_idx2 = max(0.0, 1.0 - genes[idx2])
+            
+            max_cambio = min(max_disponible_para_quitar, max_espacio_en_idx2, self.MAX_MUTATION_TRANSFER)
+            
+            if max_cambio <= 0.01:
                 continue
 
             cantidad = round(random.uniform(0.01, max_cambio), 2)
 
-            genes[idx1] = max(0.0, round(genes[idx1] - cantidad, 2))
-            genes[idx2] = min(1.0, round(genes[idx2] + cantidad, 2))  # CORRECCIÓN #1
+            genes[idx1] = max(min_permitido, round(genes[idx1] - cantidad, 2)) # Respeta el mínimo
+            genes[idx2] = min(1.0, round(genes[idx2] + cantidad, 2))
             mutation_count += 1
 
-        if mutation_count > 0:
-            self.logger.debug("Mutaciones aplicadas en individuo: %s", mutation_count)
+            if mutation_count > 0:
+                self.logger.debug("Mutaciones aplicadas en individuo: %s", mutation_count)
 
     # ─────────────────────────────────────────────────────────────────────────────
     # Bucle principal
