@@ -88,6 +88,36 @@ class GeneticAlgorithm:
         )
         self.logger.debug("Mejor individuo actual: %s", best_individual)
 
+    def _bounded_flow(self, edge_index: int, available_flow: float, gene_value: float) -> float:
+        """
+        Calcula el flujo que puede pasar por una arista respetando:
+        capacidad minima <= flujo <= capacidad maxima.
+
+        Si no se alcanza la capacidad minima, la arista no transfiere flujo.
+        """
+        cap_min, cap_max = self.edge_capacities[edge_index]
+        cap_min = max(0.0, float(cap_min))
+        cap_max = max(0.0, float(cap_max))
+
+        if available_flow <= 0:
+            return 0.0
+
+        # Si max es 0, se interpreta como sin tope explicito para este paso.
+        upper_bound = cap_max if cap_max > 0 else available_flow
+
+        # Flujo propuesto por el gen dentro del limite superior.
+        proposed = min(available_flow, upper_bound) * float(gene_value)
+
+        # Restriccion por capacidad minima.
+        if 0 < proposed < cap_min:
+            proposed = cap_min
+
+        # Nunca exceder ni lo disponible ni el maximo permitido.
+        bounded = min(proposed, available_flow, upper_bound)
+        if bounded < cap_min:
+            return 0.0
+        return round(bounded, 4)
+
     def _create_next_generation(self):
         new_population = []
         for _ in range(self.population_size // 2):
@@ -175,7 +205,7 @@ class GeneticAlgorithm:
                 max_fit,
             )
 
-# le pasa el individuo y a la clase misma
+    # le pasa el individuo y a la clase misma
     def _compute_fitness(self, individual) -> float:
         """
         Calcula el flujo total que sale por las aristas de SALIDA.
@@ -193,10 +223,7 @@ class GeneticAlgorithm:
         for i, edge in enumerate(self.edges_list):
             if edge["TipoArista"] == "ENTRADA":
                 flujo_entrada = float(edge.get("FlujoEntrada", 0))
-                cap_max = self.edge_capacities[i][1]
-                max_cap = cap_max if cap_max > 0 else flujo_entrada
-                initial_flow = min(flujo_entrada, max_cap)
-                current_flow_edges[i] = initial_flow * individual.genes[i]
+                current_flow_edges[i] = self._bounded_flow(i, flujo_entrada, individual.genes[i])
 
         if self._fitness_calls <= self.FITNESS_DEBUG_CALLS:
             input_flows = [
@@ -234,8 +261,9 @@ class GeneticAlgorithm:
                 if flujo_disponible <= 0:
                     continue
 
-                cap_max = self.edge_capacities[i][1]
-                flujo_a_pasar = min(flujo_disponible, cap_max) * individual.genes[i]
+                flujo_a_pasar = self._bounded_flow(i, flujo_disponible, individual.genes[i])
+                if flujo_a_pasar <= 0:
+                    continue
                 current_flow_edges[i] = flujo_a_pasar
 
                 # Acumular lo que este nodo consume (para no ceder más de lo disponible)
@@ -376,9 +404,9 @@ class GeneticAlgorithm:
             if mutation_count > 0:
                 self.logger.debug("Mutaciones aplicadas en individuo: %s", mutation_count)
 
-    # ─────────────────────────────────────────────────────────────────────────────
+
     # Bucle principal
-    # ─────────────────────────────────────────────────────────────────────────────
+
     def run(self):
         self.logger.info("Inicio de ejecucion del AG")
         self._initialize_population()

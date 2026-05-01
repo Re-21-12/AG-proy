@@ -167,3 +167,4 @@ El parámetro `eficiencia` se captura en la UI de configuración, pero actualmen
 ```bash
 python main.py
 ```
+![alt text](image.png)
