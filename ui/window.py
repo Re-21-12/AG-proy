@@ -46,17 +46,16 @@ class VentanaEditarGrafo(QMainWindow):
             "Configuración activa:\n"
             f"Generaciones: {self.configuracion.get('generaciones', 0)}\n"
             f"Eficiencia: {self.configuracion.get('eficiencia', 0)}%\n"
-            f"Individuos: {self.configuracion.get('individuos', 0)}"
+            f"Tamaño de población: {self.configuracion.get('individuos', 0)}"
         )
         self.layout_botones.addWidget(self.lbl_config)
 
         self.btn_agregar = QPushButton("Agregar")
         self.btn_quitar = QPushButton("Quitar")
         self.btn_preview = QPushButton("Preview")
-        self.btn_limpiar = QPushButton("Limpiar")
         self.btn_ejecutar = QPushButton("Ejecutar Algoritmo")
 
-        for btn in [self.btn_agregar, self.btn_quitar, self.btn_preview, self.btn_limpiar, self.btn_ejecutar]:
+        for btn in [self.btn_agregar, self.btn_quitar, self.btn_preview,  self.btn_ejecutar]:
             btn.setFixedWidth(100)
             self.layout_botones.addWidget(btn)
 
@@ -180,12 +179,20 @@ class VentanaEditarGrafo(QMainWindow):
             )
             mejor_solucion = ga.run()
 
+            fitness_final, frames, metrics = ga.evaluate_with_trace(mejor_solucion)
+
+            from ui.flow_animation_window import VentanaAnimacionFlujo
+            self._animacion_flujo = VentanaAnimacionFlujo(app_state.aristas_df, frames, metrics, self)
+            self._animacion_flujo.show()
+
             # 3. Mostrar resultados
             QMessageBox.information(
                 self,
                 "Resultado del Algoritmo",
-                f"Mejor Fitness (Flujo total de salida): {mejor_solucion.fitness}\n\n"
-                f"Configuración de semáforos optimizada:\n{mejor_solucion.genes}"
+                f"Flujo total de entrada: {int(metrics['total_input_flow'])}\n"
+                f"Flujo total de salida: {int(metrics['total_output_flow'])}\n"
+                f"Eficiencia: {int(metrics['efficiency_percent'])}%\n\n"
+                f"Cromosoma optimizado:\n{mejor_solucion.genes}"
             )
         except Exception as e:
             QMessageBox.critical(self, "Error en Algoritmo", f"Ocurrió un error: {e}")

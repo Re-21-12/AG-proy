@@ -1,10 +1,16 @@
 import random
-import logging
 from collections import deque
 
 try:
     from logic.individual import Individual
     from logic.state import app_state
+    from logic.logger_config import (
+        setup_logger, log_initialization, log_graph_depth_computation,
+        log_population_creation, log_population_stats, log_fitness_computation,
+        log_fitness_result, log_selection, log_crossover, log_mutation,
+        log_generation_summary, log_improvement, log_execution_start,
+        log_initial_state, log_execution_end
+    )
 except ModuleNotFoundError:
     import os
     import sys
@@ -15,6 +21,13 @@ except ModuleNotFoundError:
         sys.path.insert(0, project_root)
     from logic.individual import Individual
     from logic.state import app_state
+    from logic.logger_config import (
+        setup_logger, log_initialization, log_graph_depth_computation,
+        log_population_creation, log_population_stats, log_fitness_computation,
+        log_fitness_result, log_selection, log_crossover, log_mutation,
+        log_generation_summary, log_improvement, log_execution_start,
+        log_initial_state, log_execution_end
+    )
 
 
 class GeneticAlgorithm:
@@ -22,6 +35,10 @@ class GeneticAlgorithm:
     FITNESS_DEBUG_CALLS = 3
     SELECTION_DEBUG_CALLS = 5
     MAX_MUTATION_TRANSFER = 0.1
+
+    @staticmethod
+    def _round_to_int(value: float) -> int:
+        return int(float(value) + 0.5)
 
     def __init__(
         self,
@@ -33,7 +50,7 @@ class GeneticAlgorithm:
         debug=False,
         log_every=10,
     ):
-        self.logger = self._setup_logger(debug)
+        self.logger = setup_logger(debug)
         # Aseguramos que la población sea par para el cruce por parejas
         self.population_size = population_size if population_size % 2 == 0 else population_size + 1
         self.gene_count = gene_count
@@ -48,18 +65,26 @@ class GeneticAlgorithm:
 
         # Optimización: Convertir DF a lista para acceso rápido en el bucle de fitness
         self.edges_list = app_state.aristas_df.to_dict("records")
-        self.logger.info(
-            "AG inicializado | poblacion=%s genes=%s generaciones=%s aristas=%s",
+        log_initialization(
+            self.logger,
             self.population_size,
             self.gene_count,
             self.max_generations,
             len(self.edges_list),
+            0  # propagation_depth se calcula después
         )
         self.edge_capacities = app_state.edge_capacities
 
         # CORRECCIÓN #7: Calcular profundidad real del grafo para la propagación
         self._propagation_depth = self._compute_graph_depth()
-        self.logger.info("Profundidad del grafo calculada: %s", self._propagation_depth)
+        log_initialization(
+            self.logger,
+            self.population_size,
+            self.gene_count,
+            self.max_generations,
+            len(self.edges_list),
+            self._propagation_depth
+        )
 
     def _population_stats(self):
         if not self.population:
@@ -77,17 +102,12 @@ class GeneticAlgorithm:
 
     def _log_generation_summary(self, best_global_fitness: float, best_individual):
         worst, avg, best = self._population_stats()
-        self.logger.info(
-            "Gen %s/%s | best_gen=%.4f best_global=%.4f avg=%.4f worst=%.4f",
-            self.generation,
-            self.max_generations,
-            best,
-            best_global_fitness,
-            avg,
-            worst,
+        log_generation_summary(
+            self.logger, self.generation, self.max_generations,
+            best, best_global_fitness, avg, worst, best_individual
         )
-        self.logger.debug("Mejor individuo actual: %s", best_individual)
 
+    # Algoritmo para calcular el flujo que puede pasar por una arista respetando sus capacidades y el flujo disponible de uno a otro nodo
     def _bounded_flow(self, edge_index: int, available_flow: float, gene_value: float) -> float:
         """
         Calcula el flujo que puede pasar por una arista respetando:
@@ -116,7 +136,7 @@ class GeneticAlgorithm:
         bounded = min(proposed, available_flow, upper_bound)
         if bounded < cap_min:
             return 0.0
-        return round(bounded, 4)
+        return float(self._round_to_int(bounded))
 
     def _create_next_generation(self):
         new_population = []
@@ -129,18 +149,85 @@ class GeneticAlgorithm:
             new_population.extend([c1, c2])
         return new_population
 
-    def _setup_logger(self, debug: bool) -> logging.Logger:
-        logger = logging.getLogger("genetic_algorithm")
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter("[%(levelname)s][AG] %(message)s")
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        logger.setLevel(logging.DEBUG if debug else logging.INFO)
-        logger.propagate = False
-        return logger
+    def _effective_node_percentages(self, edge_indices: list[int], individual) -> dict[int, float]:
+        """
+        Obtiene los porcentajes efectivos de un nodo asegurando que la suma de
+        sus salidas no supere 100%.
+        """
+        raw = []
+        for edge_idx in edge_indices:
+            p = float(individual.genes[edge_idx])
+            raw.append(max(0.0, min(1.0, p)))
 
-    # CORRECCIÓN #7: Calcular profundidad del grafo basada en su topología
+        total = sum(raw)
+        if total > 1.0 and total > 0.0:
+            raw = [p / total for p in raw]
+
+        return {edge_idx: p for edge_idx, p in zip(edge_indices, raw)}
+
+    def _allocate_node_outgoing_flows(
+        self,
+        available_flow: float,
+        edge_indices: list[int],
+        individual,
+    ) -> dict[int, float]:
+        """
+        Reparte el flujo saliente de un nodo respetando:
+        - Suma de porcentajes <= 100% (normalizados por nodo)
+        - Prioridad por mayor capacidad mínima (DESC)
+        - Para cada arista: proposed = remaining × gene%
+          Si proposed < mínimo: asigna=0, remaining -= proposed
+          Si proposed >= mínimo: asigna=proposed, remaining -= proposed
+        - Nunca superar el flujo disponible del nodo
+        """
+        if available_flow <= 0 or not edge_indices:
+            return {}
+
+        available_int = float(self._round_to_int(available_flow))
+        remaining = available_int
+        flow_by_edge: dict[int, float] = {}
+
+        effective_pct = self._effective_node_percentages(edge_indices, individual)
+
+        # Primero satisfacer aristas más exigentes (mínimo más alto).
+        priority_edges = sorted(
+            edge_indices,
+            key=lambda idx: float(self.edge_capacities[idx][0]),
+            reverse=True,
+        )
+
+        for edge_idx in priority_edges:
+            if remaining <= 0:
+                break
+
+            pct = effective_pct.get(edge_idx, 0.0)
+            if pct <= 0:
+                continue
+
+            cap_min, cap_max = self.edge_capacities[edge_idx]
+            cap_min = max(0.0, float(cap_min))
+            cap_max = max(0.0, float(cap_max))
+
+            # Calcular flujo propuesto basado en gene %
+            proposed = remaining * pct
+            proposed = float(self._round_to_int(proposed))
+
+            # Respetar límite máximo
+            upper_bound = cap_max if cap_max > 0 else remaining
+            proposed = min(proposed, upper_bound)
+
+            # Si no alcanza el mínimo, no asigna pero resta el propuesto del remaining
+            if proposed < cap_min:
+                remaining -= proposed
+                continue
+
+            # Si alcanza el mínimo, asigna y resta del remaining
+            flow_by_edge[edge_idx] = proposed
+            remaining -= proposed
+
+        return flow_by_edge
+
+    # algoritmo BFS para medir la profundiad de los nodos
     def _compute_graph_depth(self) -> int:
         """
         Calcula la profundidad máxima del grafo (número de niveles de nodos)
@@ -153,17 +240,10 @@ class GeneticAlgorithm:
             dst = edge["NodoDestino"]
             graph.setdefault(src, []).append(dst)
 
-        self.logger.debug("Adyacencia construida con %s nodos origen.", len(graph))
-
         # ingresa a edges_list busca las aritas de origen si el tipo de arista es entrada es raiz
         roots = {e["NodoOrigen"] for e in self.edges_list if e["TipoArista"] == "ENTRADA"}
-        self.logger.debug("Nodos raiz detectados: %s", sorted(roots))
-
+        
         if not roots:
-            self.logger.warning(
-                "No se detectaron aristas ENTRADA; se usa profundidad por defecto=%s.",
-                self.DEFAULT_DEPTH_WITHOUT_ROOTS,
-            )
             return self.DEFAULT_DEPTH_WITHOUT_ROOTS
 
         # BFS para calcular la profundidad máxima
@@ -179,7 +259,7 @@ class GeneticAlgorithm:
 
         max_depth = max(visited.values(), default=3)
         final_depth = max(1, max_depth)
-        self.logger.debug("Profundidad BFS maxima=%s", final_depth)
+        log_graph_depth_computation(self.logger, len(graph), roots, final_depth)
         return final_depth
 
     # Inicialización
@@ -188,8 +268,7 @@ class GeneticAlgorithm:
         cada gen en el individuo representa un porcentaje de tiempo en cada semaforo """
         self.population = [Individual(long_genes=self.gene_count) for _ in range(self.population_size)]
         if self.population:
-            self.logger.info("Poblacion inicial creada: %s individuos", len(self.population))
-            self.logger.debug("Primer individuo: %s", self.population[0])
+            log_population_creation(self.logger, len(self.population), self.population[0])
 
     # Evaluación de fitness
     def _evaluate_population(self):
@@ -198,15 +277,23 @@ class GeneticAlgorithm:
             individual.fitness = self._compute_fitness(individual)
         if self.population:
             min_fit, avg_fit, max_fit = self._population_stats()
-            self.logger.debug(
-                "Fitness poblacion | min=%.4f avg=%.4f max=%.4f",
-                min_fit,
-                avg_fit,
-                max_fit,
-            )
+            log_population_stats(self.logger, min_fit, avg_fit, max_fit)
 
     # le pasa el individuo y a la clase misma
     def _compute_fitness(self, individual) -> float:
+        fitness_total, _, _ = self._evaluate_flow(individual, capture_steps=False)
+        return fitness_total
+
+    def evaluate_with_trace(self, individual):
+        """
+        Evalúa un individuo y además devuelve los pasos intermedios del flujo.
+
+        Returns:
+            tuple[float, list[dict], dict]: fitness final, lista de frames y métricas.
+        """
+        return self._evaluate_flow(individual, capture_steps=True)
+
+    def _evaluate_flow(self, individual, capture_steps: bool = False):
         """
         Calcula el flujo total que sale por las aristas de SALIDA.
 
@@ -217,25 +304,33 @@ class GeneticAlgorithm:
         """
         total_edges = len(self.edges_list)
         current_flow_edges = [0.0] * total_edges
+        frames = []
         self._fitness_calls += 1
+        total_input_flow = 0.0
 
         # ── 1. Flujo de ENTRADA ────────────────────────────────────────────────
         for i, edge in enumerate(self.edges_list):
             if edge["TipoArista"] == "ENTRADA":
                 flujo_entrada = float(edge.get("FlujoEntrada", 0))
+                total_input_flow += flujo_entrada
                 current_flow_edges[i] = self._bounded_flow(i, flujo_entrada, individual.genes[i])
 
-        if self._fitness_calls <= self.FITNESS_DEBUG_CALLS:
-            input_flows = [
-                current_flow_edges[i]
-                for i, e in enumerate(self.edges_list)
-                if e["TipoArista"] == "ENTRADA"
-            ]
-            self.logger.debug(
-                "Fitness call #%s | total_aristas=%s | flujos_entrada=%s",
-                self._fitness_calls,
-                total_edges,
-                input_flows,
+        input_flows = [
+            current_flow_edges[i]
+            for i, e in enumerate(self.edges_list)
+            if e["TipoArista"] == "ENTRADA"
+        ]
+        log_fitness_computation(self.logger, self._fitness_calls, total_edges, input_flows)
+
+        if capture_steps:
+            frames.append(
+                {
+                    "step": 0,
+                    "label": "Entrada inicial",
+                    "current_flow_edges": current_flow_edges.copy(),
+                    "incoming_flows": {},
+                    "genes": list(individual.genes),
+                }
             )
         # ── 2. Propagación con flujo acumulado persistente ────────────────────
         # Acumulamos flujo_entrante_nodos entre iteraciones para que nodos
@@ -247,35 +342,56 @@ class GeneticAlgorithm:
             dest = edge["NodoDestino"]
             flujo_entrante_nodos[dest] = flujo_entrante_nodos.get(dest, 0.0) + current_flow_edges[i]
 
+        outgoing_non_input_by_node: dict[str, list[int]] = {}
+        for i, edge in enumerate(self.edges_list):
+            if edge["TipoArista"] != "ENTRADA":
+                origen = edge["NodoOrigen"]
+                outgoing_non_input_by_node.setdefault(origen, []).append(i)
+
         for _ in range(self._propagation_depth):
             # Snapshot del flujo entrante al inicio de este paso
             flujo_snap = dict(flujo_entrante_nodos)
             nuevos_flujos: dict[str, float] = {}
 
-            for i, edge in enumerate(self.edges_list):
-                if edge["TipoArista"] == "ENTRADA":
-                    continue
-
-                origen = edge["NodoOrigen"]
-                flujo_disponible = flujo_snap.get(origen, 0.0)
+            for origen, flujo_disponible in flujo_snap.items():
                 if flujo_disponible <= 0:
                     continue
 
-                flujo_a_pasar = self._bounded_flow(i, flujo_disponible, individual.genes[i])
-                if flujo_a_pasar <= 0:
+                edge_indices = outgoing_non_input_by_node.get(origen, [])
+                if not edge_indices:
                     continue
-                current_flow_edges[i] = flujo_a_pasar
 
-                # Acumular lo que este nodo consume (para no ceder más de lo disponible)
-                nuevos_flujos[origen] = nuevos_flujos.get(origen, 0.0) + flujo_a_pasar
+                flow_by_edge = self._allocate_node_outgoing_flows(
+                    available_flow=flujo_disponible,
+                    edge_indices=edge_indices,
+                    individual=individual,
+                )
 
-                # El nodo destino recibe este flujo
-                dest = edge["NodoDestino"]
-                flujo_entrante_nodos[dest] = flujo_entrante_nodos.get(dest, 0.0) + flujo_a_pasar
+                cedido_total = 0.0
+                for edge_idx, flujo_a_pasar in flow_by_edge.items():
+                    current_flow_edges[edge_idx] = flujo_a_pasar
+                    cedido_total += flujo_a_pasar
+
+                    dest = self.edges_list[edge_idx]["NodoDestino"]
+                    flujo_entrante_nodos[dest] = flujo_entrante_nodos.get(dest, 0.0) + flujo_a_pasar
+
+                if cedido_total > 0:
+                    nuevos_flujos[origen] = nuevos_flujos.get(origen, 0.0) + cedido_total
 
             # Restar de cada origen lo que fue cedido en este paso
             for origen, cedido in nuevos_flujos.items():
                 flujo_entrante_nodos[origen] = max(0.0, flujo_entrante_nodos.get(origen, 0.0) - cedido)
+
+            if capture_steps:
+                frames.append(
+                    {
+                        "step": len(frames),
+                        "label": f"Propagación {len(frames)}",
+                        "current_flow_edges": current_flow_edges.copy(),
+                        "incoming_flows": dict(flujo_entrante_nodos),
+                        "genes": list(individual.genes),
+                    }
+                )
 
         # ── 3. Sumar SALIDAS ───────────────────────────────────────────────────
         fitness_total = sum(
@@ -283,10 +399,22 @@ class GeneticAlgorithm:
             for i, edge in enumerate(self.edges_list)
             if edge["TipoArista"] == "SALIDA"
         )
-        fitness_total = round(fitness_total, 4)
-        if self._fitness_calls <= self.FITNESS_DEBUG_CALLS:
-            self.logger.debug("Fitness call #%s resultado=%.4f", self._fitness_calls, fitness_total)
-        return fitness_total
+        fitness_total = self._round_to_int(fitness_total)
+        total_input_flow = self._round_to_int(total_input_flow)
+        efficiency = self._round_to_int((fitness_total / total_input_flow) * 100) if total_input_flow > 0 else 0
+        log_fitness_result(self.logger, self._fitness_calls, fitness_total)
+        if capture_steps:
+            metrics = {
+                "total_input_flow": total_input_flow,
+                "total_output_flow": fitness_total,
+                "efficiency_percent": efficiency,
+            }
+            return fitness_total, frames, metrics
+        return fitness_total, None, {
+            "total_input_flow": total_input_flow,
+            "total_output_flow": fitness_total,
+            "efficiency_percent": efficiency,
+        }
 
     # ─────────────────────────────────────────────────────────────────────────────
     # Selección
@@ -312,8 +440,7 @@ class GeneticAlgorithm:
 
         if total_f == 0:
             selected = random.choice(pool)
-            if self._selection_calls <= self.SELECTION_DEBUG_CALLS:
-                self.logger.debug("Seleccion #%s por azar (fitness total=0)", self._selection_calls)
+            log_selection(self.logger, self._selection_calls)
             return selected
 
         pick = random.uniform(0, total_f)
@@ -321,14 +448,7 @@ class GeneticAlgorithm:
         for ind, adj_f in zip(pool, adjusted):
             current += adj_f
             if current >= pick:
-                if self._selection_calls <= self.SELECTION_DEBUG_CALLS:
-                    self.logger.debug(
-                        "Seleccion #%s | pick=%.4f total=%.4f fitness_sel=%.4f",
-                        self._selection_calls,
-                        pick,
-                        total_f,
-                        ind.fitness,
-                    )
+                log_selection(self.logger, self._selection_calls, pick, total_f, ind.fitness)
                 return ind
         return pool[-1]
 
@@ -349,10 +469,10 @@ class GeneticAlgorithm:
             point = random.randint(1, self.gene_count - 1)
             child1_genes = g1[:point] + g2[point:]
             child2_genes = g2[:point] + g1[point:]
-            self.logger.debug("Cruce aplicado en punto=%s", point)
+            log_crossover(self.logger, applied=True, point=point)
             return Individual(genes=child1_genes), Individual(genes=child2_genes)
 
-        self.logger.debug("Cruce omitido por probabilidad")
+        log_crossover(self.logger, applied=False)
         return parent1.clone(), parent2.clone()
 
     # ─────────────────────────────────────────────────────────────────────────────
@@ -366,7 +486,7 @@ class GeneticAlgorithm:
         CORRECCIÓN #1: Se añade `min(1, ...)` en genes[idx2] para garantizar
         que ningún gen supere 1.0 tras la mutación.
         CORRECCIÓN #5: Se amplía la diversidad permitiendo múltiples mutaciones
-        por individuo (una por gen con probabilidad mutation_prob), en lugar de
+        por individuo "una por gen con probabilidad mutation_prob", en lugar de
         limitarse siempre a exactamente 2 genes.
         """
         genes = individual.genes
@@ -401,23 +521,18 @@ class GeneticAlgorithm:
             genes[idx2] = min(1.0, round(genes[idx2] + cantidad, 2))
             mutation_count += 1
 
-            if mutation_count > 0:
-                self.logger.debug("Mutaciones aplicadas en individuo: %s", mutation_count)
+        log_mutation(self.logger, mutation_count)
 
 
     # Bucle principal
 
     def run(self):
-        self.logger.info("Inicio de ejecucion del AG")
+        log_execution_start(self.logger)
         self._initialize_population()
         self._evaluate_population()
 
         global_best = self.get_best_individual().clone()
-        self.logger.info(
-            "Estado inicial | mejor_fitness=%.4f | individuo=%s",
-            global_best.fitness,
-            global_best,
-        )
+        log_initial_state(self.logger, global_best.fitness, global_best)
 
         for _ in range(self.max_generations):
             # ELITISMO: Guardamos al mejor antes de alterar la población.
@@ -440,20 +555,13 @@ class GeneticAlgorithm:
             if best_individual.fitness > global_best.fitness:
                 delta = best_individual.fitness - global_best.fitness
                 global_best = best_individual.clone()
-                self.logger.info(
-                    "MEJORA Gen %s | nuevo_best=%.4f | delta=+%.4f | individuo=%s",
-                    self.generation,
-                    global_best.fitness,
-                    delta,
-                    global_best,
-                )
+                log_improvement(self.logger, self.generation, global_best.fitness, delta, global_best)
 
             if self._should_log_generation():
                 self._log_generation_summary(global_best.fitness, best_individual)
 
         result = global_best
-        self.logger.info("Ejecucion finalizada | mejor_fitness=%.4f", result.fitness)
-        self.logger.info("Mejor individuo final: %s", result)
+        log_execution_end(self.logger, result.fitness, result)
         return result
 
     # ─────────────────────────────────────────────────────────────────────────────
